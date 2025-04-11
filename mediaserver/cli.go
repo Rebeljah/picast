@@ -81,19 +81,71 @@ type CLI struct {
 }
 
 func (c *CLI) commandMediaAdd(ctx context.Context, cmd *cli.Command) error {
-	// use ffprobe?
-	m, _ := media.ExtractMetadataFromContainerFile(cmd.Value("path").(string))
-	fmt.Println(m.Genre)
+	// given the path to a standalone or container media (mkv, mp3, mpeg-ts, mp4, etc),
+	// move/copy the file into the media storage. The file will be recoded into a
+	// RTP-friendly container codec
+	//////////
 
-	// if "format not suitable for RTP packetization (not MPEG-TS, etc)" {
-	// 	// convert and save as mpeg-ts or similar
-	// }
+	// get ffprobe data
+	// if the container is not RTP friednly, use ffmpeg to re-encode (save metadata like disposition!!)
 
-	// // index RTP packets byte offsets for effcient seek
+	// create a Metadata struct for the file
+	// - The media add command only supports adding a single file, not directories
+	//  composed of multiple element files.
+	// - The returned Metadata structure will contain exactly 1 top-level track which
+	//   either represents a container, or standalone media (e.g music).
+	// - The top-level track is a container (e.g mp4) iff it contains 2 or more
+	//   tracks representing individual elements (e.g aac, avc)
+	// - CLI users may add additional top-level tracks at a later time (e.g
+	//   an audio description)
+	// - Additional top-level tracks added later MUST be audio and/or subtitles (the
+	//   behavior of multiple video tracks is undefined as of now).
 
-	// // add to manifest
+	pName := cmd.Value("path").(string)
+	outputName := pName + ".ts" // Output will always be TS
 
-	return nil
+	log.Println("Converting media to RTP-optimized MPEG-TS format...")
+
+	ffmpegArgs := []string{
+		"-i", pName, // Input file name/path
+
+		// Video Stream Selection
+		"-map", "0:v:0?", // Keep first video stream if exists (0:v:0 with ? makes it optional)
+
+		// Audio Stream Selection
+		"-map", "0:a?", // Keep all audio streams if any exist (0:a with ? makes it optional)
+
+		// Video Encoding Settings (applied if video exists)
+		"-c:v", "libx264", // Use H.264 video codec
+		"-preset", "fast", // Faster encoding with slightly larger file size
+		"-tune", "zerolatency", // Optimize for low latency streaming
+		"-b:v", "4000k", // Target video bitrate (4000 kbps)
+		"-maxrate", "4000k", // Maximum video bitrate
+		"-minrate", "4000k", // Minimum video bitrate
+		"-bufsize", "8000k", // Ratecontrol buffer size (2x target bitrate)
+		"-x264-params", "nal-hrd=cbr:keyint=60:min-keyint=60", // Force CBR, GOP length=60 frames
+		"-pix_fmt", "yuv420p", // Standard pixel format for compatibility
+
+		// Audio Encoding Settings (applied if audio exists)
+		"-c:a", "aac", // Use AAC audio codec
+		"-b:a", "256k", // Audio bitrate (256 kbps)
+
+		// Metadata Handling
+		"-map_metadata", "0", // Copy all metadata from input to output
+
+		// MPEG-TS Output Settings
+		"-f", "mpegts", // Force MPEG-TS output format
+		"-mpegts_flags", "no_rtcp", // Disable RTCP to reduce overhead
+		"-flags", "+global_header", // Add global headers for some streaming protocols
+		"-y",       // Overwrite output file without asking
+		outputName, // Output file name/path
+	}
+
+	// TODO: Execute ffmpeg command
+	log.Printf("Would execute: ffmpeg %s", strings.Join(ffmpegArgs, " "))
+
+	// TODO: Index RTP packets byte offsets for efficient seek
+	// TODO: Add to manifest
 }
 
 func NewCLI(manifest media.MutableManifest) *CLI {

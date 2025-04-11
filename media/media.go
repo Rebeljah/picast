@@ -4,17 +4,14 @@
 package media
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/big"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/rebeljah/picast/util/fileutil"
 	"gopkg.in/vansante/go-ffprobe.v2"
@@ -149,71 +146,6 @@ func LoadMetaDataFromJSON(r io.Reader) (Metadata, error) {
 	}
 
 	return meta, nil
-}
-
-func NewContainerMetadataFromFFProbeData(data *ffprobe.ProbeData) (Metadata, error) {
-	if len(data.Streams) < 1 {
-		return Metadata{}, errors.New("no streams in ffprobe data")
-	}
-
-	structure := NewStructureInfo() // TODO fill
-
-	container := TrackInfo{
-		ID:                  "",
-		Role:                MultiplexedContainerRole,
-		MultiplexedElements: make([]TrackInfo, len(data.Streams)),
-	} // TODO finish filling
-
-	for _, stream := range data.Streams {
-		element := TrackInfo{
-			Spec: stream,
-		} // TODO fill
-
-		container.MultiplexedElements = append(
-			container.MultiplexedElements,
-			element,
-		)
-	}
-
-	structure.Tracks[container.ID] = container
-
-	return Metadata{
-		Title:        "",
-		UID:          "",
-		MediaType:    "",
-		Genre:        "",
-		Duration:     0,
-		ThumbnailURL: "",
-		IsLive:       false,
-		Structure:    structure,
-	}, nil
-}
-
-// Return the metadata of a given media file.
-//
-//	@param `name` given to os.Openfile
-//	@returns a new metadata; all metadata struct fields which CAN be parsed from
-//	the media file will be — all other struct fields will remain zero.
-func ExtractMetadataFromContainerFile(name string) (Metadata, error) {
-	ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelFn()
-
-	fileReader, err := os.Open(name)
-	if err != nil {
-		return Metadata{}, err
-	}
-
-	data, err := ffprobe.ProbeReader(ctx, fileReader)
-	if err != nil {
-		return Metadata{}, err
-	}
-
-	md, err := NewContainerMetadataFromFFProbeData(data)
-	if err != nil {
-		return Metadata{}, err
-	}
-
-	return md, nil
 }
 
 // WriteJSON serializes the MetaData to JSON format and writes it to
