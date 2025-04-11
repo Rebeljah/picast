@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Picast Mediaserver TUI",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/mediaserver/cmd/main.go",
+            "console": "integratedTerminal",
+            "showLog": true,
+            "args": [],
+            "env": {
+                
+            },
+        }
+    ]
+}
