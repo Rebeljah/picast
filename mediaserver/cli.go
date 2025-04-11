@@ -118,7 +118,7 @@ func (c *CLI) commandMediaAdd(ctx context.Context, cmd *cli.Command) error {
 		// Video Encoding Settings (applied if video exists)
 		"-c:v", "libx264", // Use H.264 video codec
 		"-preset", "fast", // Faster encoding with slightly larger file size
-		"-tune", "zerolatency", // Optimize for low latency streaming
+		"-tune", "faster", // Optimize for low latency streaming
 		"-b:v", "4000k", // Target video bitrate (4000 kbps)
 		"-maxrate", "4000k", // Maximum video bitrate
 		"-minrate", "4000k", // Minimum video bitrate
@@ -146,6 +146,18 @@ func (c *CLI) commandMediaAdd(ctx context.Context, cmd *cli.Command) error {
 
 	// TODO: Index RTP packets byte offsets for efficient seek
 	// TODO: Add to manifest
+
+	panic("")
+	// TODO Instead of allowing multiple elementary file or containers + elementary files,
+	// just convert ALL media to a single mpeg-ts container. If the user
+	// wants to add an audio track, it can be encoded into the exiting .ts
+	//
+	// This would greatly simplify the content structure variations that the
+	// server needs to handle. Simply packetize the mpeg-ts and send it. FFmpeg would
+	// handle editing the containers, and the server would not rely on a working knowledge
+	// of the underlying content structure.
+	// add -> convert -> save
+	//  - then later packetize (~7 MPEG-TS pkt / RTP pkt) -> stream -> depacketize -> play
 }
 
 func NewCLI(manifest media.MutableManifest) *CLI {

@@ -1,6 +1,5 @@
 // Package media provides core types and utilities for media stream identification,
-// format specification, and metadata handling. It supports both multiplexed (combined)
-// and track-based (separate) media representations, including live and on-demand sources.
+// format specification, and metadata handling.
 package media
 
 import (
@@ -75,56 +74,14 @@ const (
 	MPEGTS CodingFormat = "MPEG-TS"
 )
 
-// TrackID is a human-readable, url-safe identifier for a media track
-// (e.g., "main-audio", "commentary", "camera-angle-2").
-type TrackID string
-
-// TrackInfo describes a single track within a media,
-// including its identifier, functional role, and technical encoding.
-type TrackInfo struct {
-	// should be used to distinguish between tracks in a media
-	ID TrackID `sdp:"id" json:"id"`
-
-	// Role defines the track's purpose and requirements
-	Role TrackRole `sdp:"track-role" json:"trackRole"`
-
-	// provides metadata about codec, bitrate, etc
-	Spec *ffprobe.Stream
-
-	MultiplexedElements []TrackInfo `sdp:"multiplexed-elements" json:"multiplexedElements"`
-}
-
-// StructureInfo describes the technical structure of a media,
-// including its multiplexing format and track composition.
-type StructureInfo struct {
-	// BasicContentType classifies the media as AV, audio-only, or video-only
-	BasicContentType BasicMediaType
-
-	// Tracks describes all media tracks, mapped by their identifiers
-	Tracks map[TrackID]TrackInfo `sdp:"tracks" json:"tracks"`
-}
-
-func NewStructureInfo() StructureInfo {
-	return StructureInfo{
-		Tracks: make(map[TrackID]TrackInfo),
-	}
-}
-
 type Metadata struct {
-	Title        string         `sdp:"title" json:"title"`                // Human-readable title
-	UID          UID            `sdp:"id" json:"id"`                      // Unique content identifier
-	MediaType    BasicMediaType `sdp:"media-type" json:"mediaType"`       // Content classification
-	Genre        string         `sdp:"genre" json:"genre"`                // Content category
-	Duration     float64        `sdp:"duration" json:"duration"`          // Runtime in seconds
-	ThumbnailURL string         `sdp:"thumbnail-url" json:"thumbnailURL"` // Preview image URL
-	IsLive       bool           `sdp:"is-live" json:"isLive"`
-	Structure    StructureInfo  `sdp:"structure" json:"structure"`
-}
-
-func NewMetaData() Metadata {
-	return Metadata{
-		Structure: NewStructureInfo(),
-	}
+	Title        string            `sdp:"title" json:"title"`                // Human-readable title
+	UID          UID               `sdp:"id" json:"id"`                      // Unique content identifier
+	MediaType    BasicMediaType    `sdp:"media-type" json:"mediaType"`       // Content classification
+	Genre        string            `sdp:"genre" json:"genre"`                // Content category
+	Duration     float64           `sdp:"duration" json:"duration"`          // Runtime in seconds
+	ThumbnailURL string            `sdp:"thumbnail-url" json:"thumbnailURL"` // Preview image URL
+	Structure    ffprobe.ProbeData `sdp:"structure" json:"structure"`
 }
 
 // LoadMetaDataFromJSON decodes JSON media metadata from an io.Reader.

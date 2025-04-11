@@ -8,9 +8,7 @@ import (
 	"errors"
 	"io"
 	"log"
-	"maps"
 	"net"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -190,7 +188,8 @@ func (s *RTSPServer) handleSetup(ctx *requestContext) {
 	path := strings.Trim(ctx.request.URL.Path, "/ ")
 	segments := strings.Split(path, "/")
 
-	if len(segments) != 3 {
+	// media/{uid}
+	if len(segments) != 2 {
 		ctx.response.writeHeader(NotFound)
 		return
 	}
@@ -201,7 +200,6 @@ func (s *RTSPServer) handleSetup(ctx *requestContext) {
 	}
 
 	mediaUID := media.UID(segments[1])
-	trackID := media.TrackID(segments[2])
 
 	metadata, ok := s.mediaManifest.Get(mediaUID)
 
@@ -210,26 +208,9 @@ func (s *RTSPServer) handleSetup(ctx *requestContext) {
 		return
 	}
 
-	track, ok := metadata.Structure.Tracks[trackID]
+	ctx.session.Stream = NewStreamState()
 
-	if !ok {
-		ctx.response.writeHeader(NotFound)
-		return
-	}
-
-	if ctx.session == nil {
-		ctx.session = NewSession()
-		s.sessions.add(ctx.session)
-	}
-
-	streamState, ok := ctx.session.TrackStreams[trackID]
-
-	if !ok {
-		streamState = NewTrackStreamState(track)
-		ctx.session.TrackStreams[trackID] = streamState
-	}
-
-	if ok && streamState.StateNow != Init {
+	if ok && ctx.session.Stream.StateNow != Init {
 		ctx.response.writeHeader(MethodNotValidInThisState)
 		return
 	}
@@ -253,10 +234,9 @@ func (s *RTSPServer) handleSetup(ctx *requestContext) {
 	}
 
 	args := newSetupArguments(
-		streamState.StreamUID,
+		ctx.session.Stream.StreamUID,
 		ctx.raddr,
 		metadata.Structure,
-		track,
 		transportHeader.Transports,
 	)
 
@@ -275,17 +255,17 @@ func (s *RTSPServer) handleSetup(ctx *requestContext) {
 		NewTransportHeaderLine([]TransportInfo{transport}),
 	)
 
-	streamState.TransitionByMethod(ctx.request.Method)
+	ctx.session.Stream.OnSetup()
 }
 
 func (s *RTSPServer) handleTeardown(ctx *requestContext) {
-	// validate media/{id}{track}
+	// validate media/{id}
 
 	/////////////////// TODO section is repeated in HandleSetup (extract?)
 	path := strings.Trim(ctx.request.URL.Path, "/ ")
 	segments := strings.Split(path, "/")
 
-	if n := len(segments); n != 2 && n != 3 {
+	if n := len(segments); n != 2 {
 		ctx.response.writeHeader(NotFound)
 		return
 	}
@@ -296,41 +276,23 @@ func (s *RTSPServer) handleTeardown(ctx *requestContext) {
 	}
 	///////////////////////
 
-	isSessionTeardown := len(segments) == 2
-	targetStreams := make([]*TrackStreamState, 0)
+	st := ctx.session.Stream
 
-	if !isSessionTeardown { // handle single track teardown
-		st, ok := ctx.session.TrackStreams[media.TrackID(segments[2])]
-
-		if !ok {
-			ctx.response.writeHeader(NotFound)
-			return
-		}
-
-		targetStreams = append(targetStreams, st)
-
-	} else { // Whole session teardown
-		targetStreams = slices.AppendSeq(
-			targetStreams, maps.Values(ctx.session.TrackStreams),
-		)
+	if st == nil {
+		ctx.response.writeHeader(NotFound)
+		return
 	}
 
-	// make sure all the streams can actually be torn down in their current state
-	for _, st := range targetStreams {
-		if st.StateNow.After(TEARDOWN) == ErrorState {
-			ctx.response.writeHeader(MethodNotValidInThisState)
-			return
-		}
+	// make sure stream can actually be torn down in current state
+	if st.StateNow.After(TEARDOWN) == ErrorState {
+		ctx.response.writeHeader(MethodNotValidInThisState)
+		return
 	}
 
-	for _, st := range targetStreams {
-		s.rtpServer.TeardownStream(st.StreamUID)
-		st.OnTeardown(ctx)
-	}
+	s.rtpServer.TeardownStream(st.StreamUID)
+	st.OnTeardown()
 
-	if isSessionTeardown {
-		s.sessions.delete(ctx.session.UID)
-	}
+	s.sessions.delete(ctx.session.UID)
 }
 
 func (*RTSPServer) handlePlay(ctx *requestContext) {}
@@ -342,10 +304,15 @@ func (*RTSPServer) handleOptions(ctx *requestContext) {}
 func (s *RTSPServer) handleSettingContextSession(ctx *requestContext) {
 	sessionHeader, ok := ctx.request.Headers.GetLine(HeaderNameSession)
 
-	if !ok {
-		if ctx.request.Method != SETUP && ctx.request.Method != OPTIONS {
-			ctx.response.writeHeader(SessionNotFound)
-		}
+	// context not required for SETUP, OPTIONS
+	if !ok && ctx.request.Method != SETUP && ctx.request.Method != OPTIONS {
+		ctx.response.writeHeader(SessionNotFound)
+		return
+	}
+
+	// SETUP not valid for an active streaming session
+	if ok && ctx.request.Method == SETUP {
+		ctx.response.writeHeader(MethodNotValidInThisState)
 		return
 	}
 

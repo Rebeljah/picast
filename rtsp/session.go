@@ -26,41 +26,22 @@ type Session struct {
 	UID          SessionUID
 	CreatedAt    time.Time
 	ContentID    media.UID
-	TrackStreams map[media.TrackID]*TrackStreamState
+	Stream       *StreamState
 }
 
 func NewSession() *Session {
 	return &Session{
-		UID:          newSessionUID(16),
-		CreatedAt:    time.Now().UTC(),
-		TrackStreams: make(map[media.TrackID]*TrackStreamState),
+		UID:       newSessionUID(16),
+		CreatedAt: time.Now().UTC(),
+		Stream:    nil,
 	}
 }
 
-func (s *Session) State() TrackState {
+func (s *Session) State() StreamStateName {
 	s.RLock()
 	defer s.RUnlock()
 
-	trackStates := make([]TrackState, 0)
-	for _, streamInfo := range s.TrackStreams {
-		trackStates = append(trackStates, streamInfo.StateNow)
-	}
-	return StateFromTrackStreamStates(trackStates)
-}
-
-func (s *Session) ActiveStreams() []*TrackStreamState {
-	s.RLock()
-	defer s.RUnlock()
-
-	states := make([]*TrackStreamState, 0, len(s.TrackStreams))
-
-	for _, st := range s.TrackStreams {
-		if st.StateNow != Init && st.StateNow != ErrorState {
-			states = append(states, st)
-		}
-	}
-
-	return states
+	return s.Stream.StateNow
 }
 
 type sessionManager struct {

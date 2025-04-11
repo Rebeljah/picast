@@ -3,39 +3,36 @@ package rtsp
 import (
 	"net"
 
-	"github.com/rebeljah/picast/media"
+	"gopkg.in/vansante/go-ffprobe.v2"
 )
 
 // RTPServer defines what RTSP needs from the RTP implementation
 type RTPServer interface {
 	SetupStream(SetupArguments) (TransportInfo, error)
-	TeardownStream(TrackStreamUID)
-	PlayStream(TrackStreamUID)
-	PauseStream(TrackStreamUID)
+	TeardownStream(StreamUID)
+	PlayStream(StreamUID)
+	PauseStream(StreamUID)
 	Interrupt(error)
 	InterruptCause() <-chan error
 }
 
 type SetupArguments struct {
-	StreamID             TrackStreamUID
+	StreamID             StreamUID
 	RAddr                net.Addr
-	StructureInfo        media.StructureInfo
-	TrackInfo            media.TrackInfo
 	AcceptableTransports []TransportInfo
+	Spec                 ffprobe.ProbeData
 }
 
 func newSetupArguments(
-	streamID TrackStreamUID,
+	streamID StreamUID,
 	clientAddr net.Addr,
-	structureInfo media.StructureInfo,
-	trackInfo media.TrackInfo,
+	spec ffprobe.ProbeData,
 	acceptableTransports []TransportInfo,
 ) SetupArguments {
 	return SetupArguments{
 		StreamID:             streamID,
 		RAddr:                clientAddr,
-		StructureInfo:        structureInfo,
-		TrackInfo:            trackInfo,
+		Spec:                 spec,
 		AcceptableTransports: acceptableTransports,
 	}
 }

@@ -8,26 +8,25 @@ import (
 	"sync"
 
 	"github.com/pion/rtp"
-	"github.com/rebeljah/picast/media"
 	"github.com/rebeljah/picast/rtsp"
+	"gopkg.in/vansante/go-ffprobe.v2"
 )
 
-type trackStream struct {
-	id            rtsp.TrackStreamUID
+type Stream struct {
+	id            rtsp.StreamUID
 	transportInfo rtsp.TransportInfo
-	structureInfo media.StructureInfo
-	trackInfo     media.TrackInfo
+	structureInfo ffprobe.ProbeData
 	stop          chan struct{}
 	packetsOut    chan rtp.Packet
 	raddr         *net.UDPAddr
 }
 
-func (s *trackStream) teardown() {
+func (s *Stream) teardown() {
 	close(s.packetsOut)
 	close(s.stop)
 }
 
-type streams map[rtsp.TrackStreamUID]*trackStream
+type streams map[rtsp.StreamUID]*Stream
 
 // implements rtsp.RTPServer
 type Server struct {
@@ -43,7 +42,7 @@ func NewServer() *Server {
 	}
 }
 
-func (s *Server) streamTrack(stream *trackStream) {
+func (s *Server) streamTrack(stream *Stream) {
 	defer log.Printf("RTP stream with id: %v to: %v torn down\n", stream.id, stream.raddr)
 	defer s.teardownStream(stream)
 
@@ -87,8 +86,8 @@ func (s *Server) Interrupt(err error) {
 
 func (s *Server) SetupStream(args rtsp.SetupArguments) (rtsp.TransportInfo, error) {
 	log.Printf(
-		"setting up RTP stream to: %v with stream id: %v for track: (role=%v, id=%v)",
-		args.RAddr, args.StreamID, args.TrackInfo.Role, args.TrackInfo.ID,
+		"setting up RTP stream to: %v with stream id: %v",
+		args.RAddr, args.StreamID,
 	)
 
 	// Method SETUP not currently supported for a Ready / Playing track
@@ -104,11 +103,10 @@ func (s *Server) SetupStream(args rtsp.SetupArguments) (rtsp.TransportInfo, erro
 
 	selectedTransport := args.AcceptableTransports[0] // TODO: HACK! just selects most preferred without validation
 
-	s.streams[args.StreamID] = &trackStream{
+	s.streams[args.StreamID] = &Stream{
 		id:            args.StreamID,
-		structureInfo: args.StructureInfo,
-		trackInfo:     args.TrackInfo,
 		transportInfo: selectedTransport,
+		structureInfo: args.Spec,
 		stop:          make(chan struct{}),
 		packetsOut:    make(chan rtp.Packet), // TODO buffer this channel?
 		raddr:         clientUDPAddr,
@@ -119,7 +117,7 @@ func (s *Server) SetupStream(args rtsp.SetupArguments) (rtsp.TransportInfo, erro
 	return selectedTransport, nil
 }
 
-func (s *Server) teardownStream(stream *trackStream) {
+func (s *Server) teardownStream(stream *Stream) {
 	if stream == nil {
 		return
 	}
@@ -130,8 +128,8 @@ func (s *Server) teardownStream(stream *trackStream) {
 
 // close the underlying connection and cleans up the stream state
 //   - if the stream id is not found, this is a no-op.
-func (s *Server) TeardownStream(streamID rtsp.TrackStreamUID) {
-	stream, ok := s.streams[streamID]
+func (s *Server) TeardownStream(streamUID rtsp.StreamUID) {
+	stream, ok := s.streams[streamUID]
 
 	if !ok {
 		return
@@ -141,16 +139,16 @@ func (s *Server) TeardownStream(streamID rtsp.TrackStreamUID) {
 }
 
 // begin streaming
-func (s *Server) PlayStream(streamID rtsp.TrackStreamUID) {
+func (s *Server) PlayStream(uid rtsp.StreamUID) {
 	panic("not impl")
 }
 
-func (s *Server) PauseStream(streamID rtsp.TrackStreamUID) {
+func (s *Server) PauseStream(uid rtsp.StreamUID) {
 	panic("not impl")
 }
 
-func (s *Server) IsServing(streamUID rtsp.TrackStreamUID) bool {
-	_, ok := s.streams[streamUID]
+func (s *Server) IsServing(uid rtsp.StreamUID) bool {
+	_, ok := s.streams[uid]
 	return ok
 }
 
