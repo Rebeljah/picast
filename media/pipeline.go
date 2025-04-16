@@ -1,86 +1,177 @@
 package media
 
-import "time"
+import (
+	"context"
+	"errors"
+	"time"
 
-type PipeLineStageEffect func([]byte) error
+	"golang.org/x/time/rate"
+)
 
-type PipeLineStage struct {
-	effect           PipeLineStageEffect
-	outputBufferSize int
+var ErrPipeLineClosing = errors.New("pipeline closing")
+
+type PipeLineStage interface {
+	// A function that modifies a byte slice's contents and returns any error encountered.
+	//  - The Effect function SHOULD interrupt any blocking calls upon ctx cancellation.
+	//  - If the context is cancelled, the Effect function SHOULD return an errors that 'Is'
+	//    context.Cancelled
+	Effect(context.Context, []byte) error
+
+	// The channel buffer size for this stage's output. If this is the final stage,
+	// this is the buffer size of the tail of the pipe-line.
+	OutputBufferSize() int
 }
 
-// The pipe head channel MUST be managed by the caller. Closing the channel is the
-// only reliable method to tear down the pipeline. Closing the head channel causes all
-// pipeline stages to return via a cascade of channel closures. After the final stage returns,
-// the pipe tail will be closed.
-//
-// The returned error channel should be used in a select statement with the pipe tail, if an
-// error is received, the caller MUST close the input channel or the pipeline stages will keep
-// spinning until the source is exhausted. An error in one of the stages will not close
-// the pipe tail channel, rather the errored pipeline stage will become a sink, and the tail will
-// stop receiving data after subsequent buffers are emptied.
-//
-// When a pipeline stage errors, it enters a "sink mode" where it continues
-// to consume input data at a throttled rate but does not do work or output data.
-// - Prevents deadlocks by ensuring the pipeline can drain
-// - Maintains backpressure to avoid overwhelming upstream stages
-// - Minimizes resource usage during error state
-//
-// tldr; The caller must always close the pipe head input channel to ensure a proper and timely cleanup.
-func NewPipeLine(pipeHead <-chan []byte, stages ...PipeLineStage) (<-chan []byte, <-chan error) {
-	var pipeTail chan []byte
-	cherror := make(chan error, 1)
+type PipeLineThrottler struct {
+	limiter *rate.Limiter
+}
 
-	// just forward to output if no stages were added.
+func (p *PipeLineThrottler) Effect(ctx context.Context, _ []byte) error {
+	return p.limiter.Wait(ctx)
+}
+func (p *PipeLineThrottler) OutputBufferSize() int {
+	return 0
+}
+func (p *PipeLineThrottler) SetLimit(limit rate.Limit) {
+	p.limiter.SetLimit(rate.Limit(limit))
+}
+func (p *PipeLineThrottler) SetBurst(burst uint16) {
+	p.limiter.SetBurst(int(burst))
+}
+
+// Makes a pipeline stage that can throttle the output of the previous stage to a certain freq.
+// the throughput at any instant may fall below this rate, or may burst if burst > 1
+func NewPipeLineThrottler(ratePerSecond rate.Limit, burst uint16) *PipeLineThrottler {
+	return &PipeLineThrottler{
+		limiter: rate.NewLimiter(ratePerSecond, int(burst)),
+	}
+}
+
+type PipeLinePauser struct {
+	*PipeLineThrottler
+}
+
+func (p *PipeLinePauser) SetPaused(isPaused bool) {
+	if isPaused {
+		p.SetLimit(0)
+	} else {
+		p.SetLimit(rate.Inf)
+	}
+}
+
+// A pipeline pauser is a throttler where the rate can be toggled
+// between 0 and inf by the set paused function.
+// The default state is paused (a rate of 0).
+func NewPipeLinePauser() *PipeLinePauser {
+	return &PipeLinePauser{
+		PipeLineThrottler: NewPipeLineThrottler(0, 1),
+	}
+}
+
+// Creates a concurrent pipeline that autoamtically manages all goroutines and
+// channels needed. The caller is only responsible for closing the pipe-head — it will
+// never automatically close as a result of calling this function. The caller MUST
+// tear down the pipe-line by either cancelling its context, or by closing the pipe-head.
+//
+// The function returns a channel representing the tail of the pipe-line, and a channel
+// that will send errors from any pipe-line stage effect.
+//
+// If a stage effect encounters any error, it will first send the error to the error
+// channel and begin a teardown of its subsequent pipe-line stages by closing its
+// own output channel. Next, the errored stage will enter "sink" mode. The pipe-line
+// will continue to pull data from the pipe-head and sink it at the errored stage
+// until the pipe-head is closed OR the pipe-line context is cancelled. The stage will
+// continue to consume input data from the previous stage at a throttled rate but
+// does not do work or output data.
+//   - Prevents deadlocks by ensuring the pipeline can drain
+//   - Maintains backpressure to avoid overwhelming upstream stages
+//   - Minimizes resource usage during error state
+func NewPipeLine(ctx context.Context, pipeHead <-chan []byte, stages ...PipeLineStage) (<-chan []byte, <-chan error) {
+	var pipeTail chan []byte
+	channelError := make(chan error, 1+len(stages)) // every stage MUST (including stage "-1") be able to error without blocking
+
+	nextInput := make(chan []byte, 1)
+
 	if len(stages) == 0 {
 		pipeTail = make(chan []byte, 1)
+		nextInput = pipeTail
+	}
 
-		go func() {
-			defer close(pipeTail)
+	// pipeline-specific cancel to interrupt blocked pipeline effects
+	pipeLineContext, pipeLineContextCancel := context.WithCancelCause(ctx)
+
+	// stage "-1" just cancels the context if the input is closed to reach stopped stages.
+	go func(head <-chan []byte, next chan<- []byte, ctx context.Context, cancelStages context.CancelCauseFunc) {
+		defer close(next)
+
+		for {
+			select {
+			case <-ctx.Done():
+				cancelStages(ErrPipeLineClosing)
+				channelError <- errors.Join(context.Cause(ctx), ctx.Err(), ErrPipeLineClosing)
+				return
+			default:
+			}
+
+			buf, ok := <-head
+
+			// Unblock stage effects upon pipe-head closure to prevent deadlock.
+			// This has the effect of causing all stage effects that honor
+			// context cancellation to enter "sink" mode while waiting for their
+			// previous stage to close.
+			if !ok {
+				cancelStages(ErrPipeLineClosing)
+				channelError <- ErrPipeLineClosing
+				return
+			}
+
+			next <- buf
+		}
+	}(pipeHead, nextInput, ctx, pipeLineContextCancel)
+
+	// stages [0, n]
+	for i, stage := range stages {
+		currentOutput := make(chan []byte, stage.OutputBufferSize())
+
+		if i+1 == len(stages) {
+			pipeTail = currentOutput
+		}
+
+		go func(ctx context.Context, in <-chan []byte, out chan<- []byte, plStage PipeLineStage) {
+			defer close(out)
+
+		pumpData:
 			for {
-				b, ok := <-pipeHead
+				select {
+				case <-ctx.Done():
+					break pumpData
+				default:
+				}
 
+				buf, ok := <-in
+
+				// We don't have to enter sink mode if previous stage
+				// just got torn down. Immediately continue tearing down
+				// the pipe-line from this stage onward; [i,n].
 				if !ok {
 					return
 				}
 
-				pipeTail <- b
-			}
-		}()
-		return pipeTail, cherror
-	}
-
-	in := pipeHead
-	for idx, stage := range stages {
-		out := make(chan []byte, stage.outputBufferSize)
-
-		if idx+1 == len(stages) {
-			pipeTail = out
-		}
-
-		go func(in <-chan []byte, out chan<- []byte, f PipeLineStageEffect) {
-			defer close(out)
-
-			for {
-				buf, ok := <-in
-
-				if !ok { // closed
-					return
-				}
-
-				err := f(buf)
+				err := plStage.Effect(ctx, buf)
 
 				if err != nil {
-					cherror <- err
-					break
+					if !errors.Is(err, errors.Join(context.Canceled, ErrPipeLineClosing)) { // caller should already know that the ctx cancelled.
+						channelError <- err // SHOULD be an error originating in the Effect func, not from cancellation.
+					}
+					break pumpData
 				}
 
 				out <- buf
 			}
 
-			// sink data here until input is closed
-			// has the effect of stalling further reads from the pipe tail
-			// after subsequent buffers have been emptied.
+			close(out) // this won't be used anymore, begin teardown of stages (i,n]
+
+			// sink data from i-1 buffer here until output from i-1 is closed.
 			for {
 				if _, ok := <-in; !ok {
 					return
@@ -88,10 +179,10 @@ func NewPipeLine(pipeHead <-chan []byte, stages ...PipeLineStage) (<-chan []byte
 				time.Sleep(15 * time.Millisecond)
 			}
 
-		}(in, out, stage.effect)
+		}(pipeLineContext, nextInput, currentOutput, stage)
 
-		in = out
+		nextInput = currentOutput
 	}
 
-	return pipeTail, cherror
+	return pipeTail, channelError
 }
