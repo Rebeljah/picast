@@ -22,11 +22,12 @@ type Stage interface {
 	// this is the buffer size of the tail of the pipe-line.
 	OutputBufferSize() int
 
-	// A function that releases / cleans up all resources that the Stage created.
-	//  - called autoamtically by the pipe-line on stage tear-down.
+	// A non-blocking function that releases / cleans up all resources that the Stage created.
+	//  - called automatically by the pipe-line on stage tear-down.
 	//  - Idempotency is not required (see next bullet).
 	//  - This function MUST NOT not be called from the Stage Effect func UNLESS it
 	//    is idempotent AND the Effect func subsequently returns an error.
+	//  - MUST NOT be called concurrently with the Effect.
 	//  - The error is an unrecoverable error that either originated in the Stage Effect,
 	//    or it 'Is' context.Canceled or 'Is' context.DeadlineExceeded. The error also may
 	//    wrap a ctx cancellation cause, but this is usually not of concern to
@@ -88,7 +89,52 @@ func NewPauserStage() *PauserStage {
 	}
 }
 
-func runPreStage[T any](head <-chan T, next chan<- T, ctx context.Context, cancelStages context.CancelCauseFunc, channelError chan<- error) {
+type SplitStage struct {
+	stageBase
+	splitChannel chan any
+	blocking     bool
+}
+
+func (s *SplitStage) Effect(ctx context.Context, data any) error {
+	if s.blocking {
+		select {
+		case s.splitChannel <- data:
+		case <-ctx.Done():
+			return errors.Join(ctx.Err(), context.Cause(ctx))
+		}
+	} else {
+		select {
+		case s.splitChannel <- data:
+		default:
+		}
+	}
+
+	return nil
+}
+
+func (s *SplitStage) Teardown(error) {
+	close(s.splitChannel)
+}
+
+// Splits a pipeline into 2 paths by sending data to a second output channel before
+// sending it the the next stage in the main pipeline. The constructor returns the SplitStage
+// and it's split output channel. Notably this allows combining pipelines by using the
+// output channel as the head input of a new pipeline.
+//   - The output channel is closed when the stage is torn-down by its pipeline.
+//   - If blocking is set true, the pipeline will stall at this stage in the event
+//     that the split consumer does not empty the buffer fast enough.
+//   - If blocking is set false, the split stage may skip units of data, but the
+//     main pipeline will not stall as a result of a slow consumer.
+func NewSplitStage(splitChannelBufferSize int, blocking bool) (*SplitStage, <-chan any) {
+	stage := &SplitStage{
+		splitChannel: make(chan any, splitChannelBufferSize),
+		blocking:     blocking,
+	}
+
+	return stage, stage.splitChannel
+}
+
+func runPreStage[T any](ctx context.Context, head <-chan T, next chan<- T, cancelStages context.CancelCauseFunc, channelError chan<- error) {
 	defer close(next)
 
 	for {
@@ -220,7 +266,7 @@ func NewPipeline[T any](ctx context.Context, pipeHead <-chan T, stages ...Stage)
 	pipeLineContext, pipeLineContextCancel := context.WithCancelCause(ctx)
 
 	// stage "-1" just cancels the context if the input is closed to reach stopped stages.
-	go runPreStage(pipeHead, nextInput, ctx, pipeLineContextCancel, channelError)
+	go runPreStage(ctx, pipeHead, nextInput, pipeLineContextCancel, channelError)
 
 	// stages [0, n]
 	for i, stage := range stages {
@@ -236,4 +282,32 @@ func NewPipeline[T any](ctx context.Context, pipeHead <-chan T, stages ...Stage)
 	}
 
 	return pipeTail, channelError
+}
+
+func useexample() {
+	pauser := NewPauserStage()
+	pauser.SetPaused(false)
+	sampler, sample := NewSplitStage(10, false)
+
+	observablePausablePipeline, channelErr := NewPipeline(context.Background(), make(<-chan []byte), pauser, sampler)
+
+	// run a branched pipeline concurrently using the split data as input
+	go func(stageSample <-chan any) {
+		thottablePipelineObserverPipeline, channelErr := NewPipeline(context.Background(), stageSample, NewPipeLineThrottler(1000, 10))
+		for {
+			select {
+			case <-thottablePipelineObserverPipeline:
+			case <-channelErr:
+				return
+			}
+		}
+	}(sample)
+
+	for {
+		select {
+		case <-observablePausablePipeline:
+		case <-channelErr:
+			return
+		}
+	}
 }
